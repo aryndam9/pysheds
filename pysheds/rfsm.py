@@ -4,7 +4,9 @@ from scipy import ndimage, optimize
 from pysheds.grid import Grid
 from pysheds.view import Raster
 import skimage.morphology
+from skimage.segmentation import watershed
 from itertools import combinations, chain
+
 
 class RFSM:
     def __init__(self, dem, max_levels=100, max_spills=100, min_size=0, boundary=None):
@@ -127,12 +129,26 @@ class RFSM:
         ws = []
         for index in range(len(self.levels) - 1):
             mask = (self.has_lower[index + 1][self.levels[index + 1]])
-            w = skimage.morphology.watershed(self.dem, self.levels[index],
+            w = watershed(self.dem, self.levels[index],
                                              mask=mask, watershed_line=True)
             w = np.where(mask, w, -1)
             ws.append(w)
         ws.append(self.levels[-1])
         self.ws = ws
+
+    def _select_surround_ravel(self, i, shape):
+        """
+        Select the eight indices surrounding a flattened index.
+        """
+        offset = shape[1]
+        return np.array([i + 0 - offset,
+                        i + 1 - offset,
+                        i + 1 + 0,
+                        i + 1 + offset,
+                        i + 0 + offset,
+                        i - 1 + offset,
+                        i - 1 + 0,
+                        i - 1 - offset]).T
 
     def find_connections(self):
         c = {}
@@ -144,8 +160,7 @@ class RFSM:
             b[index] = {}
             comm = np.flatnonzero((self.ws[index] == 0) & inside)
             # TODO: Not super elegant
-            neighbors = self.ws[index].flat[Grid._select_surround_ravel(self, comm,
-                                                                        self.ws[index].shape)]
+            neighbors = self.ws[index].flat[self._select_surround_ravel(comm, self.ws[index].shape)]
             comms = dict(zip(comm, [set() for i in comm]))
             for region in self.lup[index].keys():
                 for elem in comm[(neighbors == region).any(axis=1)]:
@@ -195,14 +210,14 @@ class RFSM:
         full = np.concatenate(full)
         dropmap = pd.DataFrame(np.column_stack([level, subnum]), index=full)
         # Figure out where each drop will end up
-        drop = skimage.morphology.watershed(self.dem,
+        drop = watershed(self.dem,
                                             np.where(self.ws[0] > 0, self.ws[0], 0),
                                             mask=self.ws[1] > 0)
         for index in range(1, len(self.ws) - 1):
             num_lower = sum(self.ns[:index])
             base = drop + np.where((self.ws[index] > 0) & (drop == 0),
                                    num_lower + self.ws[index], 0)
-            drop = skimage.morphology.watershed(self.dem, base,
+            drop = watershed(self.dem, base,
                                                 mask=self.ws[index + 1] > 0)
         self.dropmap = dropmap
         self.drop = drop
@@ -261,8 +276,7 @@ class RFSM:
                     upper_label = self.lup[index][j]
                     child = self.nodes[index][j]
                     parent = self.nodes[index + 1][upper_label]
-                    parent.elev = np.asscalar(self.dem[self.levels[index + 1]
-                                                       == upper_label].min())
+                    parent.elev = self.dem[self.levels[index + 1] == upper_label].min().item()
                     child.parent = parent
                     parent.l = child
                     self.nodes[index][j] = child
@@ -281,7 +295,7 @@ class RFSM:
                 i, j = pair
                 comm = int(node.comm)
                 comm_elev = node.elev
-                neighbors = Grid._select_surround_ravel(self, comm, self.dem.shape)
+                neighbors = self._select_surround_ravel(comm, self.dem.shape)
                 ser = pd.DataFrame(np.column_stack([neighbors, self.dem.flat[neighbors],
                                                     self.ws[index].flat[neighbors]]))
                 ser = ser[ser[2].isin(list(pair))]
@@ -327,7 +341,7 @@ class RFSM:
                                                     for pair in combinations(leaves, 2)]))
             mask.flat[boundary] = True
             full = z - self.dem[mask]
-        vol = abs(np.asscalar(full[full > 0].sum()) * self.x * self.y)
+        vol = abs(full[full > 0].sum().item() * self.x * self.y)
         return vol - target_vol - under_vol
 
     def spill(self):
@@ -371,7 +385,7 @@ class RFSM:
         if node.parent:
             if node.name:
                 elevdiff = node.parent.elev - self.dem[self.ws[node.level] == node.name]
-                vol = abs(np.asscalar(elevdiff[elevdiff > 0].sum()) * self.x * self.y)
+                vol = abs(elevdiff[elevdiff > 0].sum().item() * self.x * self.y)
                 node.vol = vol
             else:
                 leaves = []
@@ -381,7 +395,7 @@ class RFSM:
                                                         for pair in combinations(leaves, 2)]))
                 mask.flat[boundary] = True
                 elevdiff = node.parent.elev - self.dem[mask]
-                vol = abs(np.asscalar(elevdiff[elevdiff > 0].sum()) * self.x * self.y)
+                vol = abs(elevdiff[elevdiff > 0].sum().item() * self.x * self.y)
                 node.vol = vol
 
     def set_marginal_capacities(self, node):
@@ -430,7 +444,7 @@ class RFSM:
         if node.vol == 0:
             full = np.array(True, dtype=bool)
             self.check_full(node, full)
-            full = np.asscalar(full)
+            full = full.item()
             return full
         return node.current_vol >= node.vol
 
